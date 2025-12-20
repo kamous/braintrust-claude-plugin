@@ -1,5 +1,5 @@
 """
-Braintrust Skill Eval: Experiment Workflows
+Braintrust skill eval: experiment workflows
 
 Tests the agent's ability to create, run, analyze, and compare experiments.
 This covers the full evaluation lifecycle in Braintrust.
@@ -7,165 +7,129 @@ This covers the full evaluation lifecycle in Braintrust.
 Run with: braintrust eval evals/eval_experiments.py
 """
 
-import os
+import sys
 from pathlib import Path
 
-# Load .env file FIRST
-for env_path in [Path(__file__).parent / ".env", Path(__file__).parent.parent / ".env"]:
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.strip() and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip().strip('"\''))
+sys.path.insert(0, str(Path(__file__).parent))
 
 from braintrust import Eval
-from autoevals import Score
+from scorers import criteria_scorer, get_anthropic_client
 
-
-def experiment_code_scorer(output, expected, **kwargs):
-    """
-    Scorer that checks if the output contains correct experiment code patterns.
-    """
-    if not output:
-        return Score(name="ExperimentCode", score=0, metadata={"reason": "empty output"})
-    
-    output_lower = output.lower()
-    required = expected if isinstance(expected, list) else []
-    
-    if not required:
-        return Score(name="ExperimentCode", score=1)
-    
-    matches = sum(1 for item in required if item.lower() in output_lower)
-    score = matches / len(required)
-    missing = [item for item in required if item.lower() not in output_lower]
-    
-    return Score(
-        name="ExperimentCode",
-        score=score,
-        metadata={"matched": matches, "total": len(required), "missing": missing}
-    )
-
-
-def analysis_quality_scorer(output, expected, **kwargs):
-    """
-    Scorer for experiment analysis quality - checks for actionable insights.
-    """
-    if not output:
-        return Score(name="AnalysisQuality", score=0)
-    
-    output_lower = output.lower()
-    
-    # Indicators of good analysis
-    analysis_indicators = [
-        "score", "improvement", "regression", "compare", "difference",
-        "better", "worse", "suggest", "recommend", "because", "pattern"
-    ]
-    
-    matches = sum(1 for ind in analysis_indicators if ind in output_lower)
-    score = min(1.0, matches / 5)  # Cap at 1.0, need at least 5 indicators for full score
-    
-    return Score(
-        name="AnalysisQuality",
-        score=score,
-        metadata={"analysis_indicators_found": matches}
-    )
-
-
-# OpenAI client via Braintrust proxy
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="https://api.braintrust.dev/v1/proxy",
-    api_key=os.environ.get("BRAINTRUST_API_KEY"),
-)
+client = get_anthropic_client()
 
 
 def baseline_task(input_str):
     """Baseline task without skill - test what Claude knows about experiments."""
-    response = client.chat.completions.create(
-        model="claude-sonnet-4-20250514",
-        messages=[
-            {
-                "role": "system",
-                "content": """You are a helpful assistant for Braintrust, an LLM evaluation platform.
-
-When asked about experiments:
-- Use Braintrust's Eval() function with data, task, and scores parameters
-- Import from 'braintrust' and 'autoevals' for scorers
-- Use proper Python/TypeScript syntax
-- Be specific about scorer names (Factuality, Levenshtein, etc.)
-
-When analyzing experiments:
-- Look at score distributions and identify patterns
-- Compare experiments using summarize_experiment with comparison_experiment_id
-- Identify improvements and regressions
-- Provide actionable recommendations"""
-            },
-            {"role": "user", "content": input_str}
-        ],
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
         max_tokens=1500,
+        system="""You are a helpful assistant for Braintrust, an LLM evaluation platform.
+
+When asked about experiments, provide specific code examples and actionable guidance.
+Be precise about Braintrust-specific APIs and patterns.""",
+        messages=[{"role": "user", "content": input_str}],
     )
-    return response.choices[0].message.content or ""
+    return response.content[0].text
 
 
-# Experiment workflow test cases
+# Experiment workflow test cases with natural language criteria
 EXPERIMENT_DATA = [
     # Creating experiments
     {
         "input": "Write Python code to create a simple Braintrust eval that tests if an LLM can answer 'What is 2+2?' correctly. Use the Factuality scorer.",
-        "expected": ["Eval", "data", "task", "scores", "Factuality", "braintrust", "autoevals"],
-        "metadata": {"category": "create_experiment", "difficulty": "easy"}
+        "expected": [
+            "Imports Eval from braintrust",
+            "Imports Factuality from autoevals",
+            "Defines a data parameter with test cases including input/expected",
+            "Defines a task function that calls an LLM",
+            "Passes Factuality as a scorer",
+        ],
+        "metadata": {"category": "create_experiment", "difficulty": "easy"},
     },
     {
         "input": "Write a Braintrust eval that tests a summarization task with 3 test cases. Include both Factuality and a custom length-based scorer.",
-        "expected": ["Eval", "data", "task", "scores", "Factuality", "def", "score"],
-        "metadata": {"category": "create_experiment", "difficulty": "medium"}
+        "expected": [
+            "Uses Eval() with data containing 3 test cases",
+            "Includes Factuality scorer from autoevals",
+            "Defines a custom scorer function that checks length",
+            "Custom scorer returns a Score object with value 0-1",
+        ],
+        "metadata": {"category": "create_experiment", "difficulty": "medium"},
     },
     {
         "input": "How do I pass metadata to an experiment in Braintrust, like the model name and temperature I used?",
-        "expected": ["metadata", "model", "Eval"],
-        "metadata": {"category": "create_experiment", "difficulty": "easy"}
+        "expected": [
+            "Shows the metadata parameter in Eval()",
+            "Metadata is a dictionary with arbitrary key-value pairs",
+            "Example includes model name or configuration values",
+        ],
+        "metadata": {"category": "create_experiment", "difficulty": "easy"},
     },
-    
     # Running experiments
     {
         "input": "How do I run a Braintrust eval from the command line?",
-        "expected": ["braintrust eval", "npx", ".py", ".ts"],
-        "metadata": {"category": "run_experiment", "difficulty": "easy"}
+        "expected": [
+            "Shows braintrust eval command",
+            "Specifies path to eval file (.py or .ts)",
+            "Mentions npx braintrust for TypeScript or braintrust eval for Python",
+        ],
+        "metadata": {"category": "run_experiment", "difficulty": "easy"},
     },
     {
         "input": "How can I run an eval locally without sending results to Braintrust?",
-        "expected": ["--no-send-logs", "braintrust eval"],
-        "metadata": {"category": "run_experiment", "difficulty": "easy"}
+        "expected": [
+            "Shows --no-send-logs flag",
+            "Used with braintrust eval command",
+            "Results are computed but not uploaded",
+        ],
+        "metadata": {"category": "run_experiment", "difficulty": "easy"},
     },
-    
     # Analyzing experiments
     {
         "input": "I have an experiment with 60% Factuality score. How can I see which specific test cases failed?",
-        "expected": ["filter", "scores", "Factuality", "< 0.5"],
-        "metadata": {"category": "analyze_experiment", "difficulty": "medium"}
+        "expected": [
+            "Filter by score to find failing cases (e.g., scores.Factuality < 0.5)",
+            "Can use BTQL or the UI to filter results",
+            "Examine input/output pairs for failing cases",
+        ],
+        "metadata": {"category": "analyze_experiment", "difficulty": "medium"},
     },
     {
         "input": "How do I compare two experiments in Braintrust to see what improved or regressed?",
-        "expected": ["compare", "summarize", "improvement", "regression"],
-        "metadata": {"category": "analyze_experiment", "difficulty": "medium"}
+        "expected": [
+            "Use summarize_experiment with comparison_experiment_id parameter",
+            "Shows score differences between experiments",
+            "Identifies improvements and regressions",
+        ],
+        "metadata": {"category": "analyze_experiment", "difficulty": "medium"},
     },
     {
         "input": "My experiment shows some test cases with low scores. How should I analyze the patterns to improve my prompt?",
-        "expected": ["pattern", "input", "output", "score", "prompt"],
-        "metadata": {"category": "analyze_experiment", "difficulty": "hard"}
+        "expected": [
+            "Look at common patterns in failing inputs",
+            "Examine the outputs to understand why scores are low",
+            "Iterate on the prompt based on failure patterns",
+        ],
+        "metadata": {"category": "analyze_experiment", "difficulty": "hard"},
     },
-    
     # Advanced patterns
     {
         "input": "How do I create a scorer that returns multiple scores from a single function?",
-        "expected": ["Score", "list", "name", "score"],
-        "metadata": {"category": "advanced", "difficulty": "hard"}
+        "expected": [
+            "Return a list of Score objects from the scorer function",
+            "Each Score has its own name and value",
+            "Example showing multiple Score() returns",
+        ],
+        "metadata": {"category": "advanced", "difficulty": "hard"},
     },
     {
         "input": "How do I use a dataset from Braintrust as the data source for my eval?",
-        "expected": ["init_dataset", "data", "Eval"],
-        "metadata": {"category": "advanced", "difficulty": "medium"}
+        "expected": [
+            "Use init_dataset() to load an existing dataset",
+            "Pass the dataset to Eval()'s data parameter",
+            "Dataset records become test cases",
+        ],
+        "metadata": {"category": "advanced", "difficulty": "medium"},
     },
 ]
 
@@ -175,11 +139,10 @@ Eval(
     "Braintrust Skill - Experiments",
     data=lambda: EXPERIMENT_DATA,
     task=baseline_task,
-    scores=[experiment_code_scorer, analysis_quality_scorer],
+    scores=[criteria_scorer],
     metadata={
         "description": "Tests agent's ability to create, run, and analyze Braintrust experiments",
         "skill": "using-braintrust",
-        "category": "experiments"
-    }
+        "category": "experiments",
+    },
 )
-
