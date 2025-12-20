@@ -1,16 +1,91 @@
 # Braintrust Skill
 
-A skill for working with Braintrust, an LLM evaluation and observability platform.
+A skill that enables AI agents to use Braintrust for LLM evaluation, logging, and observability.
+
+## Installing the Skill
+
+### For Claude Desktop / Claude Code
+
+Add the skill to your Claude configuration by pointing to the `SKILL.md` file:
+
+**Option 1: Clone the repo**
+```bash
+git clone https://github.com/braintrustdata/braintrust-skill.git
+```
+
+Then add to your Claude settings:
+```
+Skills: /path/to/braintrust-skill/skill/SKILL.md
+```
+
+**Option 2: Direct URL (if supported)**
+```
+Skills: https://raw.githubusercontent.com/braintrustdata/braintrust-skill/main/skill/SKILL.md
+```
+
+### For other AI agents
+
+Copy the contents of `skill/SKILL.md` into your agent's system prompt or context.
+
+### Requirements
+
+The skill requires:
+- `BRAINTRUST_API_KEY` environment variable set
+- Python packages: `braintrust`, `autoevals`
+
+## What the Skill Provides
+
+The skill teaches AI agents how to:
+
+1. **Run evaluations** with `braintrust.Eval()`
+2. **Log data** with `braintrust.init_logger()`
+3. **Use scorers** from `autoevals` (Factuality, etc.)
+4. **Query logs** with BTQL
+
+### Key API patterns
+
+```python
+# Correct Eval() usage - project name is FIRST POSITIONAL arg
+braintrust.Eval(
+    "My Project",  # NOT project_name="My Project"
+    data=lambda: [...],
+    task=lambda input: ...,
+    scores=[Factuality],
+)
+
+# Logging with flush
+logger = braintrust.init_logger(project="My Project")
+logger.log(input="hello", output="world")
+logger.flush()  # Important!
+```
 
 ## Project Structure
 
 ```
 braintrust-skill/
-├── evals/              # Evaluation suite (separate package)
-│   └── pyproject.toml  # Eval-specific dependencies
-├── pyproject.toml      # Root tooling config (ruff, ty, pre-commit)
-└── .pre-commit-config.yaml
+├── skill/                  # The skill itself
+│   ├── SKILL.md           # Main skill documentation
+│   └── scripts/           # Helper scripts
+│       ├── run_eval.py
+│       ├── log_data.py
+│       └── query_logs.py
+├── evals/                  # Evaluation suite
+│   ├── eval_e2e_*.py      # End-to-end tests
+│   └── eval_*.py          # Other evals
+├── EVAL_RESULTS.md        # Skill impact analysis
+└── README.md
 ```
+
+## Eval Results
+
+The skill was developed using evaluation-driven development. Results:
+
+| Eval | Before Skill | After Skill |
+|------|--------------|-------------|
+| Log Fetch - Task Completed | 67% | **100%** |
+| Experiment - Task Completed | 0% | **100%** |
+
+See [EVAL_RESULTS.md](EVAL_RESULTS.md) for details.
 
 ## Development
 
@@ -22,43 +97,33 @@ braintrust-skill/
 ### Setup
 
 ```bash
-# Install dev tools (from repo root)
+# Install dev tools
 uv sync --group dev
 
 # Install pre-commit hooks
 uv run pre-commit install
 ```
 
-### Pre-commit Hooks
-
-This project uses [pre-commit](https://pre-commit.com/) hooks to ensure code quality:
-
-- **ruff** - Fast Python linter with auto-fix (includes import sorting)
-- **ruff-format** - Code formatter
-- **ty** - Astral's extremely fast type checker
-- **General hygiene** - Trailing whitespace, EOF fixer, YAML validation, etc.
-
-Hooks run automatically on `git commit`. You can also run them manually:
+### Running Evals
 
 ```bash
-# Run all hooks on all files
-uv run pre-commit run --all-files
+# Set your API key
+export BRAINTRUST_API_KEY="your-key"
 
-# Format code only
-uv run ruff format .
+# Run all evals
+uv run braintrust eval evals/
 
-# Lint and auto-fix
-uv run ruff check . --fix
+# Run specific eval
+uv run braintrust eval evals/eval_e2e_log_fetch.py
 ```
 
-## Packages
+### Pre-commit Hooks
 
-### evals/
-
-Evaluation suite for testing the Braintrust skill. See [evals/README.md](evals/README.md).
+- **ruff** - Linter with auto-fix
+- **ruff-format** - Code formatter
+- **ty** - Type checker
 
 ```bash
-cd evals
-uv sync
-uv run python eval_docs_search.py
+# Run all hooks
+uv run pre-commit run --all-files
 ```
