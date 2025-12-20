@@ -4,34 +4,35 @@ A skill that enables AI agents to use Braintrust for LLM evaluation, logging, an
 
 ## Installing the Skill
 
-### For Claude Desktop / Claude Code
+### Claude Code / Claude Agent SDK
 
-Add the skill to your Claude configuration by pointing to the `SKILL.md` file:
-
-**Option 1: Clone the repo**
+**One-liner:**
 ```bash
-git clone https://github.com/braintrustdata/braintrust-skill.git
+mkdir -p ~/.claude/skills && curl -sL https://github.com/braintrustdata/braintrust-skill/archive/main.tar.gz | tar -xz -C ~/.claude/skills --strip-components=2 braintrust-skill-main/skill && mv ~/.claude/skills/skill ~/.claude/skills/braintrust
 ```
 
-Then add to your Claude settings:
-```
-Skills: /path/to/braintrust-skill/skill/SKILL.md
-```
-
-**Option 2: Direct URL (if supported)**
-```
-Skills: https://raw.githubusercontent.com/braintrustdata/braintrust-skill/main/skill/SKILL.md
+**Or clone and copy:**
+```bash
+git clone https://github.com/braintrustdata/braintrust-skill.git /tmp/braintrust-skill
+cp -r /tmp/braintrust-skill/skill ~/.claude/skills/braintrust
 ```
 
-### For other AI agents
+Claude automatically discovers skills in `~/.claude/skills/` by looking for directories containing `SKILL.md`.
 
-Copy the contents of `skill/SKILL.md` into your agent's system prompt or context.
+### Claude.ai (web)
+
+1. Download this repo as a ZIP file
+2. Go to **Settings > Features** in Claude.ai
+3. Upload the ZIP file under "Custom Skills"
+
+### Other AI agents
+
+Copy the contents of [`skill/SKILL.md`](skill/SKILL.md) into your agent's system prompt.
 
 ### Requirements
 
-The skill requires:
-- `BRAINTRUST_API_KEY` environment variable set
-- Python packages: `braintrust`, `autoevals`
+- `BRAINTRUST_API_KEY` environment variable
+- Python packages: `braintrust`, `autoevals` (Claude will install these automatically)
 
 ## What the Skill Provides
 
