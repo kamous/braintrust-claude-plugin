@@ -1,0 +1,12 @@
+[project]
+name = "braintrust-skill-evals"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "autoevals>=0.0.130",
+    "braintrust>=0.3.14",
+    "dotenv>=0.9.9",
+    "openai>=2.14.0",
+]
