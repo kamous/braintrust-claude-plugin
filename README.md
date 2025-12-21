@@ -1,4 +1,4 @@
-# Braintrust Claude Plugin
+# Braintrust Claude plugin
 
 A Claude Code plugin that enables AI agents to use Braintrust for LLM evaluation, logging, and observability.
 
