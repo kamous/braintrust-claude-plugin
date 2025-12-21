@@ -15,7 +15,7 @@ Or via the interactive UI:
 /plugin install braintrust@braintrust-claude-plugin
 ```
 
-## Agent Skills
+## Agent skills
 
 This repo also includes a [Braintrust skill](skills/using-braintrust/SKILL.md) built on the open [Agent Skills](https://agentskills.io/home) format, compatible with Claude Code, Cursor, Amp, and other agents.
 
@@ -34,7 +34,7 @@ BRAINTRUST_API_KEY=your-api-key-here
 
 The plugin scripts automatically load `.env` files from the current directory or parent directories.
 
-## What the Plugin Provides
+## What the plugin provides
 
 ### Scripts
 
@@ -55,7 +55,7 @@ uv run log_data.py --project "My Project" --input "hello" --output "world"
 uv run run_eval.py --project "My Project" --data '[{"input": "test", "expected": "test"}]'
 ```
 
-### SDK Patterns
+### SDK patterns
 
 The skill teaches Claude how to use the Braintrust SDK correctly:
 
@@ -74,7 +74,7 @@ logger.log(input="hello", output="world")
 logger.flush()  # Important!
 ```
 
-### SQL Query Syntax
+### SQL query syntax
 
 The skill teaches Claude to write SQL queries for Braintrust logs:
 
@@ -86,7 +86,7 @@ SELECT input, output, created FROM logs WHERE created > now() - interval 1 day L
 - Use `hour()`, `day()`, `month()`, `year()` instead of `date_trunc()`
 - Intervals use format `interval 1 day` (no quotes, singular unit)
 
-## Project Structure
+## Project structure
 
 ```
 braintrust-claude-plugin/
@@ -113,7 +113,7 @@ braintrust-claude-plugin/
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
 
-### Local Testing
+### Local testing
 
 Test the plugin without installing from marketplace:
 
@@ -121,7 +121,7 @@ Test the plugin without installing from marketplace:
 claude --plugin-dir /path/to/braintrust-claude-plugin
 ```
 
-### Running Evals
+### Running evals
 
 The `evals/` directory contains tests that verify the skill works correctly (e.g., Claude generates valid SQL queries, logs data properly).
 
@@ -136,7 +136,7 @@ uv run braintrust eval .
 uv run braintrust eval eval_e2e_log_fetch.py
 ```
 
-### Pre-commit Hooks
+### Pre-commit hooks
 
 ```bash
 # Install hooks
@@ -146,7 +146,7 @@ uv run pre-commit install
 uv run pre-commit run --all-files
 ```
 
-## Updating the Plugin
+## Updating the plugin
 
 After making changes:
 
