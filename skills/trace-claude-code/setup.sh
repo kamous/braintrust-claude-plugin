@@ -226,11 +226,33 @@ echo "To view hook logs:"
 echo "  tail -f ~/.claude/state/braintrust_hook.log"
 echo ""
 
-# Test API connection
+# Test API connection and discover API URL
 echo "Testing API connection..."
+
+# Discover API URL via login endpoint
+APP_URL="${BRAINTRUST_APP_URL:-https://www.braintrust.dev}"
+LOGIN_RESPONSE=$(curl -sf -X POST -H "Authorization: Bearer $BRAINTRUST_API_KEY" "$APP_URL/api/apikey/login" 2>/dev/null) || true
+
+ORG_NAME="${BRAINTRUST_ORG_NAME:-}"
+if [ -n "$ORG_NAME" ]; then
+    # Filter by org name if specified
+    API_URL=$(echo "$LOGIN_RESPONSE" | jq -r --arg name "$ORG_NAME" \
+        '.org_info[] | select(.name == $name) | .api_url // empty' 2>/dev/null | head -1)
+else
+    # Use first org
+    API_URL=$(echo "$LOGIN_RESPONSE" | jq -r '.org_info[0].api_url // empty' 2>/dev/null)
+fi
+
+if [ -z "$API_URL" ]; then
+    # Fall back to default if login didn't return an API URL
+    API_URL="https://api.braintrust.dev"
+fi
+
+echo "  Using API URL: $API_URL"
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X GET \
     -H "Authorization: Bearer $BRAINTRUST_API_KEY" \
-    "https://api.braintrust.dev/v1/project?project_name=$(echo "$PROJECT_NAME" | jq -sRr @uri)" 2>&1)
+    "$API_URL/v1/project?project_name=$(echo "$PROJECT_NAME" | jq -sRr @uri)" 2>&1)
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
 
