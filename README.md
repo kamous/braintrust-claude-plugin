@@ -72,3 +72,9 @@ claude --settings '{"env":{"CC_PARENT_SPAN_ID":"parent-span-id","CC_ROOT_SPAN_ID
 ```
 
 The Claude Code session and all its turns/tools will appear as children of your parent span in Braintrust.
+
+To attach claude code to an experiment's trace, specify CC_EXPERIMENT_ID as well:
+
+```bash
+claude --settings '{"env":{"CC_PARENT_SPAN_ID":"parent-span-id","CC_ROOT_SPAN_ID":"root-span-id", "CC_EXPERIMENT_ID":"the-experiment-id"}}' -p "task"
+```

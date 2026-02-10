@@ -28,6 +28,12 @@ ROOT_SPAN_ID=$(get_session_state "$SESSION_ID" "root_span_id")
 SESSION_SPAN_ID=$(get_session_state "$SESSION_ID" "session_span_id")
 PROJECT_ID=$(get_session_state "$SESSION_ID" "project_id")
 
+# Load experiment_id from session state if not already set
+if [ -z "$CC_EXPERIMENT_ID" ]; then
+    CC_EXPERIMENT_ID=$(get_session_state "$SESSION_ID" "experiment_id")
+    export CC_EXPERIMENT_ID
+fi
+
 # If no session root exists yet, we'll create it
 if [ -z "$ROOT_SPAN_ID" ] || [ -z "$PROJECT_ID" ]; then
     PROJECT_ID=$(get_project_id "$PROJECT") || { log "ERROR" "Failed to get project"; exit 0; }

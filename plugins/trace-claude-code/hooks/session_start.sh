@@ -27,9 +27,18 @@ if [ -z "$SESSION_ID" ]; then
     debug "Generated session ID: $SESSION_ID"
 fi
 
-# Get project ID
-PROJECT_ID=$(get_project_id "$PROJECT") || { log "ERROR" "Failed to get project"; exit 0; }
-debug "Using project: $PROJECT (id: $PROJECT_ID)"
+# Determine mode and get appropriate IDs
+if is_experiment_mode; then
+    debug "Experiment mode: CC_EXPERIMENT_ID=$CC_EXPERIMENT_ID"
+    # In experiment mode, we still get project_id for state management
+    # but spans are inserted to the experiment endpoint
+    PROJECT_ID=$(get_project_id "$PROJECT") || PROJECT_ID="experiment-mode"
+    log "INFO" "Tracing to experiment: $CC_EXPERIMENT_ID"
+else
+    # Get project ID for project_logs mode
+    PROJECT_ID=$(get_project_id "$PROJECT") || { log "ERROR" "Failed to get project"; exit 0; }
+    debug "Using project: $PROJECT (id: $PROJECT_ID)"
+fi
 
 # Check if we already have a root span for this session
 EXISTING_ROOT=$(get_session_state "$SESSION_ID" "root_span_id")
@@ -104,6 +113,12 @@ set_session_state "$SESSION_ID" "turn_count" "0"
 set_session_state "$SESSION_ID" "tool_count" "0"
 set_session_state "$SESSION_ID" "started" "$TIMESTAMP"
 
-log "INFO" "Created session root: $SESSION_ID workspace=$WORKSPACE_NAME"
+# Store experiment_id if in experiment mode
+if is_experiment_mode; then
+    set_session_state "$SESSION_ID" "experiment_id" "$CC_EXPERIMENT_ID"
+    log "INFO" "Created session root: $SESSION_ID workspace=$WORKSPACE_NAME (experiment=$CC_EXPERIMENT_ID)"
+else
+    log "INFO" "Created session root: $SESSION_ID workspace=$WORKSPACE_NAME (project=$PROJECT)"
+fi
 
 exit 0

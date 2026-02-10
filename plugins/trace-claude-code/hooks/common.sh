@@ -22,6 +22,10 @@ fi
 export CC_PARENT_SPAN_ID="${CC_PARENT_SPAN_ID:-}"
 export CC_ROOT_SPAN_ID="${CC_ROOT_SPAN_ID:-}"
 
+# Experiment mode configuration
+# If CC_EXPERIMENT_ID is set, spans are inserted into the experiment instead of project_logs
+export CC_EXPERIMENT_ID="${CC_EXPERIMENT_ID:-}"
+
 # Resolve API URL via login endpoint (with caching)
 resolve_api_url() {
     # Check for explicit override first
@@ -151,7 +155,26 @@ get_project_id() {
     return 1
 }
 
+# Check if we're in experiment mode
+is_experiment_mode() {
+    [ -n "$CC_EXPERIMENT_ID" ]
+}
+
+# Get the insert endpoint URL based on mode (experiment vs project_logs)
+get_insert_endpoint() {
+    local object_id="$1"
+    local api_url
+    api_url=$(get_api_url)
+
+    if is_experiment_mode; then
+        echo "$api_url/v1/experiment/$CC_EXPERIMENT_ID/insert"
+    else
+        echo "$api_url/v1/project_logs/$object_id/insert"
+    fi
+}
+
 # Insert a span to Braintrust
+# In experiment mode, project_id is ignored and CC_EXPERIMENT_ID is used instead
 insert_span() {
     local project_id="$1"
     local event_json="$2"
@@ -164,22 +187,24 @@ insert_span() {
         return 1
     fi
 
-    local api_url
-    api_url=$(get_api_url)
+    local endpoint
+    endpoint=$(get_insert_endpoint "$project_id")
+    debug "Insert endpoint: $endpoint"
+
     local resp http_code
     # Use -w to capture HTTP status, don't use -f so we can see error responses
     resp=$(curl -s -w "\n%{http_code}" -X POST \
         -H "Authorization: Bearer $API_KEY" \
         -H "Content-Type: application/json" \
         -d "{\"events\": [$event_json]}" \
-        "$api_url/v1/project_logs/$project_id/insert" 2>&1)
+        "$endpoint" 2>&1)
 
     # Extract HTTP code from last line
     http_code=$(echo "$resp" | tail -1)
     resp=$(echo "$resp" | sed '$d')
 
     if [ "$http_code" != "200" ]; then
-        log "ERROR" "Insert failed (HTTP $http_code): $resp"
+        log "ERROR" "Insert failed (HTTP $http_code) to $endpoint: $resp"
         return 1
     fi
 

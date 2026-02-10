@@ -32,6 +32,12 @@ ROOT_SPAN_ID=$(get_session_state "$SESSION_ID" "root_span_id")
 PROJECT_ID=$(get_session_state "$SESSION_ID" "project_id")
 TURN_SPAN_ID=$(get_session_state "$SESSION_ID" "current_turn_span_id")
 
+# Load experiment_id from session state if not already set
+if [ -z "$CC_EXPERIMENT_ID" ]; then
+    CC_EXPERIMENT_ID=$(get_session_state "$SESSION_ID" "experiment_id")
+    export CC_EXPERIMENT_ID
+fi
+
 # If no turn span exists, tools are orphaned - skip
 if [ -z "$TURN_SPAN_ID" ] || [ -z "$PROJECT_ID" ]; then
     debug "No current turn for session $SESSION_ID, skipping tool trace"
