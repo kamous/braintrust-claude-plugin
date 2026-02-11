@@ -5,7 +5,8 @@
 
 # Config
 export LOG_FILE="$HOME/.claude/state/braintrust_hook.log"
-export STATE_FILE="$HOME/.claude/state/braintrust_state.json"
+export CACHE_FILE="$HOME/.claude/state/braintrust_cache.json"
+export SESSION_STATE_DIR="$HOME/.claude/state/braintrust_sessions"
 export DEBUG="${BRAINTRUST_CC_DEBUG:-false}"
 export API_KEY="${BRAINTRUST_API_KEY}"
 export PROJECT="${BRAINTRUST_CC_PROJECT:-claude-code}"
@@ -26,6 +27,41 @@ export CC_ROOT_SPAN_ID="${CC_ROOT_SPAN_ID:-}"
 # If CC_EXPERIMENT_ID is set, spans are inserted into the experiment instead of project_logs
 export CC_EXPERIMENT_ID="${CC_EXPERIMENT_ID:-}"
 
+# Ensure directories exist
+mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$(dirname "$CACHE_FILE")"
+mkdir -p "$SESSION_STATE_DIR"
+
+# Logging (defined early so other functions can use it)
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG_FILE"; }
+
+# Check if a value is truthy (true, 1, yes, on - case insensitive)
+is_truthy() {
+    local val="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+    [[ "$val" == "true" || "$val" == "1" || "$val" == "yes" || "$val" == "on" ]]
+}
+
+debug() { is_truthy "$DEBUG" && log "DEBUG" "$1" || true; }
+
+###
+# Cache management (shared across sessions, used for API URL and project IDs)
+# Uses simple file-based caching - minor races here are harmless (just extra API calls)
+###
+
+get_cache_value() {
+    local key="$1"
+    [ -f "$CACHE_FILE" ] && cat "$CACHE_FILE" | jq -r ".$key // empty" 2>/dev/null || echo ""
+}
+
+set_cache_value() {
+    local key="$1"
+    local value="$2"
+    local cache
+    cache=$([ -f "$CACHE_FILE" ] && cat "$CACHE_FILE" || echo '{}')
+    cache=$(echo "$cache" | jq --arg k "$key" --arg v "$value" '.[$k] = $v')
+    echo "$cache" > "$CACHE_FILE"
+}
+
 # Resolve API URL via login endpoint (with caching)
 resolve_api_url() {
     # Check for explicit override first
@@ -36,7 +72,7 @@ resolve_api_url() {
 
     # Check cache
     local cached_url
-    cached_url=$(get_state_value "api_url")
+    cached_url=$(get_cache_value "api_url")
     if [ -n "$cached_url" ]; then
         echo "$cached_url"
         return 0
@@ -64,7 +100,7 @@ resolve_api_url() {
     fi
 
     if [ -n "$api_url" ]; then
-        set_state_value "api_url" "$api_url"
+        set_cache_value "api_url" "$api_url"
         echo "$api_url"
         return 0
     fi
@@ -80,21 +116,6 @@ get_api_url() {
     fi
     echo "$_RESOLVED_API_URL"
 }
-
-# Ensure directories exist
-mkdir -p "$(dirname "$LOG_FILE")"
-mkdir -p "$(dirname "$STATE_FILE")"
-
-# Logging
-log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG_FILE"; }
-
-# Check if a value is truthy (true, 1, yes, on - case insensitive)
-is_truthy() {
-    local val="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
-    [[ "$val" == "true" || "$val" == "1" || "$val" == "yes" || "$val" == "on" ]]
-}
-
-debug() { is_truthy "$DEBUG" && log "DEBUG" "$1" || true; }
 
 # Check if tracing is enabled
 tracing_enabled() {
@@ -117,7 +138,7 @@ get_project_id() {
 
     # Check cache first
     local cached_id
-    cached_id=$(get_state_value "$cache_key")
+    cached_id=$(get_cache_value "$cache_key")
     if [ -n "$cached_id" ]; then
         echo "$cached_id"
         return 0
@@ -135,7 +156,7 @@ get_project_id() {
     pid=$(echo "$resp" | jq -r '.id // empty' 2>/dev/null)
 
     if [ -n "$pid" ]; then
-        set_state_value "$cache_key" "$pid"
+        set_cache_value "$cache_key" "$pid"
         echo "$pid"
         return 0
     fi
@@ -147,7 +168,7 @@ get_project_id() {
     pid=$(echo "$resp" | jq -r '.id // empty' 2>/dev/null)
 
     if [ -n "$pid" ]; then
-        set_state_value "$cache_key" "$pid"
+        set_cache_value "$cache_key" "$pid"
         echo "$pid"
         return 0
     fi
@@ -220,44 +241,92 @@ insert_span() {
     fi
 }
 
-# State management
-load_state() {
-    [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo "{}"
+###
+# Per-session state management
+# Each session has its own state file: $SESSION_STATE_DIR/{session_id}.json
+# This eliminates race conditions between sessions entirely.
+###
+
+# Get the state file path for a session
+get_session_state_file() {
+    local session_id="$1"
+    echo "$SESSION_STATE_DIR/${session_id}.json"
 }
 
-save_state() {
-    echo "$1" > "$STATE_FILE"
-}
-
-get_state_value() {
-    local key="$1"
-    load_state | jq -r ".$key // empty"
-}
-
-set_state_value() {
-    local key="$1"
-    local value="$2"
-    local state
-    state=$(load_state)
-    state=$(echo "$state" | jq --arg k "$key" --arg v "$value" '.[$k] = $v')
-    save_state "$state"
-}
-
+# Get a value from session state
 get_session_state() {
     local session_id="$1"
     local key="$2"
-    load_state | jq -r ".sessions[\"$session_id\"].$key // empty"
+    local state_file
+    state_file=$(get_session_state_file "$session_id")
+    [ -f "$state_file" ] && cat "$state_file" | jq -r ".$key // empty" 2>/dev/null || echo ""
 }
 
+# Set a value in session state
 set_session_state() {
     local session_id="$1"
     local key="$2"
     local value="$3"
-    local state
-    state=$(load_state)
-    state=$(echo "$state" | jq --arg s "$session_id" --arg k "$key" --arg v "$value" \
-        '.sessions[$s] = (.sessions[$s] // {}) | .sessions[$s][$k] = $v')
-    save_state "$state"
+    local state_file state
+    state_file=$(get_session_state_file "$session_id")
+    state=$([ -f "$state_file" ] && cat "$state_file" || echo '{}')
+    state=$(echo "$state" | jq --arg k "$key" --arg v "$value" '.[$k] = $v')
+    echo "$state" > "$state_file"
+}
+
+# Atomic check-and-set for session state - returns 0 if set, 1 if already exists
+# Uses mkdir as an atomic lock for the specific session
+check_and_set_session_state() {
+    local session_id="$1"
+    local key="$2"
+    local value="$3"
+    local state_file lock_dir
+    state_file=$(get_session_state_file "$session_id")
+    lock_dir="${state_file}.lock"
+
+    # Try to acquire lock for this specific session
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+        # Another process is initializing this session, wait briefly and check
+        sleep 0.1
+        local existing
+        existing=$(get_session_state "$session_id" "$key")
+        if [ -n "$existing" ]; then
+            echo "$existing"
+            return 1
+        fi
+        # Lock was released but key still not set - try again
+        rmdir "$lock_dir" 2>/dev/null || true
+        if ! mkdir "$lock_dir" 2>/dev/null; then
+            # Still can't get lock, just check and return
+            existing=$(get_session_state "$session_id" "$key")
+            if [ -n "$existing" ]; then
+                echo "$existing"
+                return 1
+            fi
+        fi
+    fi
+
+    # We have the lock - check if key already exists
+    local existing
+    existing=$(get_session_state "$session_id" "$key")
+    if [ -n "$existing" ]; then
+        rmdir "$lock_dir" 2>/dev/null || true
+        echo "$existing"
+        return 1
+    fi
+
+    # Set the value
+    set_session_state "$session_id" "$key" "$value"
+    rmdir "$lock_dir" 2>/dev/null || true
+    return 0
+}
+
+# Clean up old session state files (call periodically or from session_stop)
+cleanup_old_sessions() {
+    local max_age_hours="${1:-24}"
+    local max_age_minutes=$((max_age_hours * 60))
+    find "$SESSION_STATE_DIR" -name "*.json" -mmin "+$max_age_minutes" -delete 2>/dev/null || true
+    find "$SESSION_STATE_DIR" -name "*.lock" -mmin "+5" -delete 2>/dev/null || true
 }
 
 # Generate a UUID

@@ -40,13 +40,6 @@ else
     debug "Using project: $PROJECT (id: $PROJECT_ID)"
 fi
 
-# Check if we already have a root span for this session
-EXISTING_ROOT=$(get_session_state "$SESSION_ID" "root_span_id")
-if [ -n "$EXISTING_ROOT" ]; then
-    debug "Session already has root span: $EXISTING_ROOT"
-    exit 0
-fi
-
 # Create the session span
 # If CC_PARENT_SPAN_ID is set, this session becomes a child of an existing trace
 if [ -n "$CC_PARENT_SPAN_ID" ]; then
@@ -57,6 +50,15 @@ else
 fi
 SPAN_ID="$SESSION_ID"
 TIMESTAMP=$(get_timestamp)
+
+# Atomically check if we already have a root span for this session and set it if not
+# This prevents race conditions when session_start is called multiple times
+if ! check_and_set_session_state "$SESSION_ID" "root_span_id" "$ROOT_SPAN_ID"; then
+    EXISTING_ROOT=$(get_session_state "$SESSION_ID" "root_span_id")
+    debug "Session already has root span (race avoided): $EXISTING_ROOT"
+    exit 0
+fi
+debug "Claimed session root span: $ROOT_SPAN_ID"
 
 # Extract workspace info if available
 WORKSPACE=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
@@ -100,13 +102,13 @@ EVENT=$(jq -n \
 
 # Add span_parents if attaching to an existing trace
 if [ -n "$CC_PARENT_SPAN_ID" ]; then
+    debug "Setting span_parents to: $CC_PARENT_SPAN_ID"
     EVENT=$(echo "$EVENT" | jq --arg parent "$CC_PARENT_SPAN_ID" '. + {span_parents: [$parent]}')
 fi
 
 ROW_ID=$(insert_span "$PROJECT_ID" "$EVENT") || { log "ERROR" "Failed to create session root"; exit 0; }
 
-# Save session state
-set_session_state "$SESSION_ID" "root_span_id" "$ROOT_SPAN_ID"
+# Save remaining session state (root_span_id was already set atomically above)
 set_session_state "$SESSION_ID" "session_span_id" "$SPAN_ID"
 set_session_state "$SESSION_ID" "project_id" "$PROJECT_ID"
 set_session_state "$SESSION_ID" "turn_count" "0"
