@@ -39,10 +39,16 @@ _braintrust_load_env_file() {
     return 0
 }
 
-for _f in "${BRAINTRUST_ENV_FILE:-}" "$PWD/.github/hooks/braintrust.env" "$PWD/.braintrust.env"; do
+# Under Copilot CLI, $PWD is the plugin install dir, not the user's project.
+# $COPILOT_PROJECT_DIR (always set by Copilot) is the project root. Claude
+# Code runs hooks with $PWD already at the project root, so falls back.
+_BT_PROJECT_ROOT="${COPILOT_PROJECT_DIR:-$PWD}"
+for _f in "${BRAINTRUST_ENV_FILE:-}" \
+          "$_BT_PROJECT_ROOT/.github/hooks/braintrust.env" \
+          "$_BT_PROJECT_ROOT/.braintrust.env"; do
     [ -n "$_f" ] && _braintrust_load_env_file "$_f" && break
 done
-unset _f
+unset _f _BT_PROJECT_ROOT
 
 # Config
 export LOG_FILE="$HOME/.claude/state/braintrust_hook.log"
