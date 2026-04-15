@@ -124,4 +124,31 @@ else
     log "INFO" "Created session root: $SESSION_ID workspace=$WORKSPACE_NAME (project=$PROJECT)"
 fi
 
+# Copilot CLI: task sessions never receive userPromptSubmitted, so pre-create
+# Turn 1 here.  UserPromptSubmit will overwrite current_turn_span_id when it
+# does fire (main session), making this a no-op for that case.
+if [ "${CC_RUNTIME:-claude}" = "copilot" ]; then
+    TURN_SPAN_ID=$(generate_uuid)
+    TURN_START=$(get_epoch)
+    TURN_EVENT=$(jq -n \
+        --arg id "$TURN_SPAN_ID" \
+        --arg root "$ROOT_SPAN_ID" \
+        --arg parent "$SPAN_ID" \
+        --arg created "$TIMESTAMP" \
+        --argjson start "$TURN_START" \
+        '{
+            id: $id, span_id: $id,
+            root_span_id: $root,
+            span_parents: [$parent],
+            created: $created,
+            metrics: { start: $start },
+            span_attributes: { name: "Turn 1", type: "task" }
+        }')
+    insert_span "$PROJECT_ID" "$TURN_EVENT" >/dev/null \
+        && set_session_state "$SESSION_ID" "current_turn_span_id" "$TURN_SPAN_ID" \
+        && set_session_state "$SESSION_ID" "turn_count" "1" \
+        && log "INFO" "Pre-created Turn 1 for Copilot task session ($TURN_SPAN_ID)" \
+        || true
+fi
+
 exit 0

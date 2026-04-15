@@ -685,11 +685,15 @@ lazy_create_agent_span() {
     start_time=$(get_epoch)
     timestamp=$(get_timestamp)
 
+    # Fall back to root span when no Turn span exists (e.g. Copilot task sessions).
+    # An empty parent would be rejected by the Braintrust API.
+    local parent="${turn_span_id:-$root_span_id}"
+
     local event
     event=$(jq -n \
         --arg id          "$agent_span_id" \
         --arg root        "$root_span_id" \
-        --arg parent      "$turn_span_id" \
+        --arg parent      "$parent" \
         --arg created     "$timestamp" \
         --arg agent_id    "$agent_id" \
         --arg agent_type  "$agent_type" \
