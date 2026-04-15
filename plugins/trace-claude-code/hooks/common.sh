@@ -7,6 +7,43 @@
 # Directory of this file — used to locate runtime adapters
 _COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Auto-load project-local env file. Generic plugin can't bake in a per-user
+# API key; let users drop a file in their project. First match wins; pre-set
+# vars in the shell take precedence (we only set keys not already exported).
+# Search order:
+#   $BRAINTRUST_ENV_FILE (explicit override)
+#   <cwd>/.github/hooks/braintrust.env  (recommended for Copilot CLI)
+#   <cwd>/.braintrust.env
+_braintrust_load_env_file() {
+    local f="$1"
+    [ -f "$f" ] || return 1
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+        # Strip optional leading "export "
+        line="${line#export }"
+        key="${line%%=*}"
+        val="${line#*=}"
+        # Strip surrounding single/double quotes from value
+        case "$val" in
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        # Don't override variables already set in the environment.
+        if [ -z "${!key+x}" ]; then
+            export "$key=$val"
+        fi
+    done < "$f"
+    return 0
+}
+
+for _f in "${BRAINTRUST_ENV_FILE:-}" "$PWD/.github/hooks/braintrust.env" "$PWD/.braintrust.env"; do
+    [ -n "$_f" ] && _braintrust_load_env_file "$_f" && break
+done
+unset _f
+
 # Config
 export LOG_FILE="$HOME/.claude/state/braintrust_hook.log"
 export CACHE_FILE="$HOME/.claude/state/braintrust_cache.json"
@@ -258,25 +295,46 @@ get_session_state_file() {
     echo "$SESSION_STATE_DIR/${session_id}.json"
 }
 
-# Get a value from session state
+# Get a value from session state.
+# Use jq's --arg form so keys with hyphens/special chars (e.g.
+# "copilot_agent_span_agent-glossary") are looked up literally; the dot form
+# ".$key" misparses as subtraction for hyphenated keys.
 get_session_state() {
     local session_id="$1"
     local key="$2"
     local state_file
     state_file=$(get_session_state_file "$session_id")
-    [ -f "$state_file" ] && cat "$state_file" | jq -r ".$key // empty" 2>/dev/null || echo ""
+    [ -f "$state_file" ] && cat "$state_file" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null || echo ""
 }
 
-# Set a value in session state
+# Set a value in session state.
+# Atomic read-modify-write using an mkdir lock, because Copilot CLI fires
+# PreToolUse hooks in parallel for batched tool calls and the naive
+# read/jq/write pattern clobbers concurrent writers.
 set_session_state() {
     local session_id="$1"
     local key="$2"
     local value="$3"
-    local state_file state
+    local state_file lock_dir state tmp_file i
     state_file=$(get_session_state_file "$session_id")
-    state=$([ -f "$state_file" ] && cat "$state_file" || echo '{}')
-    state=$(echo "$state" | jq --arg k "$key" --arg v "$value" '.[$k] = $v')
-    echo "$state" > "$state_file"
+    lock_dir="${state_file}.wlock"
+
+    # Spin briefly to acquire the lock (max ~1.5s — hook timeout headroom).
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if mkdir "$lock_dir" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    state=$([ -f "$state_file" ] && cat "$state_file" 2>/dev/null || echo '{}')
+    # Guard against empty / corrupted state.
+    echo "$state" | jq empty 2>/dev/null || state='{}'
+    state=$(echo "$state" | jq -c --arg k "$key" --arg v "$value" '.[$k] = $v')
+    tmp_file="${state_file}.$$.tmp"
+    echo "$state" > "$tmp_file" && mv -f "$tmp_file" "$state_file"
+
+    rmdir "$lock_dir" 2>/dev/null || true
 }
 
 # Atomic check-and-set for session state - returns 0 if set, 1 if already exists

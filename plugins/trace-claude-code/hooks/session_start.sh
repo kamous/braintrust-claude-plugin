@@ -69,6 +69,12 @@ HOSTNAME=$(get_hostname)
 USERNAME=$(get_username)
 OS=$(get_os)
 
+case "$RUNTIME" in
+    copilot) RUNTIME_LABEL="Copilot CLI" ;;
+    codex)   RUNTIME_LABEL="Codex CLI" ;;
+    *)       RUNTIME_LABEL="Claude Code" ;;
+esac
+
 EVENT=$(jq -n \
     --arg id "$SPAN_ID" \
     --arg span_id "$SPAN_ID" \
@@ -81,6 +87,7 @@ EVENT=$(jq -n \
     --arg username "$USERNAME" \
     --arg os "$OS" \
     --arg runtime "$RUNTIME" \
+    --arg label "$RUNTIME_LABEL" \
     '{
         id: $id,
         span_id: $span_id,
@@ -96,7 +103,7 @@ EVENT=$(jq -n \
             runtime: $runtime
         },
         span_attributes: {
-            name: ("Claude Code: " + $workspace),
+            name: ($label + ": " + $workspace),
             type: "task"
         }
     }')
@@ -147,8 +154,14 @@ if [ "${CC_RUNTIME:-claude}" = "copilot" ]; then
     insert_span "$PROJECT_ID" "$TURN_EVENT" >/dev/null \
         && set_session_state "$SESSION_ID" "current_turn_span_id" "$TURN_SPAN_ID" \
         && set_session_state "$SESSION_ID" "turn_count" "1" \
+        && set_session_state "$SESSION_ID" "turn_span_1" "$TURN_SPAN_ID" \
+        && set_session_state "$SESSION_ID" "turn_start_1" "$TURN_START" \
         && log "INFO" "Pre-created Turn 1 for Copilot task session ($TURN_SPAN_ID)" \
         || true
 fi
+
+# Stash cwd so session_end.sh / copilot_events.sh can locate the native
+# Copilot session-state directory and backfill LLM/sub-agent spans.
+[ -n "$WORKSPACE" ] && set_session_state "$SESSION_ID" "cwd" "$WORKSPACE"
 
 exit 0

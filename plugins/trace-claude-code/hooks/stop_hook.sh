@@ -47,6 +47,14 @@ if [ -n "$CONV_FILE" ] && [ -f "$CONV_FILE" ]; then
     emit_llm_spans_for_transcript "$CONV_FILE" "$TURN_SPAN_ID" "turn_last_line" "$SESSION_ID" "$PROJECT_ID" "$ROOT_SPAN_ID"
 fi
 
+# Copilot CLI: incrementally backfill LLM/sub-agent spans from events.jsonl.
+# Done on every Stop (not just session_end) because Copilot does not always
+# emit sessionEnd, and we want spans to appear progressively.
+if [ "${CC_RUNTIME:-claude}" = "copilot" ]; then
+    source "$SCRIPT_DIR/copilot_events.sh"
+    emit_copilot_event_spans "$SESSION_ID" "$PROJECT_ID" "$ROOT_SPAN_ID" || true
+fi
+
 # Close the Turn span
 END_TIME=$(get_epoch)
 TURN_UPDATE=$(jq -n \

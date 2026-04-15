@@ -25,14 +25,14 @@ AGENT_TRANSCRIPT=$(echo "$INPUT" | jq -r '.agent_transcript_path // empty' 2>/de
 
 [ -z "$SESSION_ID" ] && exit 0
 
-# Copilot CLI: subagentStop may not carry an agent_id (payload fields are
-# unconfirmed — to be validated in Phase 0). Synthesize one so we still
-# capture the sub-agent output as a span.
+# Copilot CLI: subagentStop payload carries no correlating fields (no
+# agent_id / prompt / lastMessage). Agent lifecycle is driven instead by
+# the paired `task` + `read_agent` tool calls in post_tool_use.sh, so skip
+# here to avoid emitting empty ghost spans.
 if [ -z "$AGENT_ID" ]; then
     if [ "${CC_RUNTIME:-claude}" = "copilot" ]; then
-        AGENT_ID="copilot_subagent_$(generate_uuid | head -c 8)"
-        [ -z "$AGENT_TYPE" ] && AGENT_TYPE="Agent"
-        debug "SubagentStop: synthesized agent_id=$AGENT_ID"
+        debug "SubagentStop (copilot): skipping — handled via task/read_agent"
+        exit 0
     else
         debug "SubagentStop missing agent_id"; exit 0
     fi

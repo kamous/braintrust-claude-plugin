@@ -25,22 +25,26 @@ _copilot_get_or_init_session_id() {
     local event_hint="$1"
     local session_id
 
-    if [ "$event_hint" = "session_start" ]; then
-        session_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-        mkdir -p "$(dirname "$_COPILOT_SESSION_FILE")"
-        echo "$session_id" > "$_COPILOT_SESSION_FILE"
-    else
-        if [ -f "$_COPILOT_SESSION_FILE" ]; then
+    # Copilot may fire userPromptSubmitted BEFORE sessionStart (task-session
+    # architecture). To keep the whole CLI run stitched together, reuse the
+    # existing file if it was written within the last 30 min — otherwise treat
+    # as stale and rotate. session_end explicitly clears the file.
+    if [ -f "$_COPILOT_SESSION_FILE" ]; then
+        local mtime now age
+        mtime=$(stat -f %m "$_COPILOT_SESSION_FILE" 2>/dev/null || stat -c %Y "$_COPILOT_SESSION_FILE" 2>/dev/null)
+        now=$(date +%s)
+        age=$(( now - ${mtime:-0} ))
+        if [ "$age" -lt 1800 ]; then
             session_id=$(cat "$_COPILOT_SESSION_FILE")
-        else
-            # sessionStart missed; create a fallback session
-            session_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-            mkdir -p "$(dirname "$_COPILOT_SESSION_FILE")"
-            echo "$session_id" > "$_COPILOT_SESSION_FILE"
         fi
     fi
 
-    # Delete session file at end of session so the next session gets a fresh id
+    if [ -z "$session_id" ]; then
+        session_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+        mkdir -p "$(dirname "$_COPILOT_SESSION_FILE")"
+        echo "$session_id" > "$_COPILOT_SESSION_FILE"
+    fi
+
     [ "$event_hint" = "session_end" ] && rm -f "$_COPILOT_SESSION_FILE" 2>/dev/null || true
 
     echo "$session_id"
