@@ -335,9 +335,259 @@ generate_uuid() {
     uuidgen | tr '[:upper:]' '[:lower:]'
 }
 
-# Get current ISO timestamp
+# Get current ISO timestamp (millisecond precision when python3 is available)
 get_timestamp() {
-    date -u +"%Y-%m-%dT%H:%M:%S.000Z"
+    python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.")+f"{datetime.now(timezone.utc).microsecond//1000:03d}Z")' 2>/dev/null \
+        || gdate -u +"%Y-%m-%dT%H:%M:%S.%3NZ" 2>/dev/null \
+        || date -u +"%Y-%m-%dT%H:%M:%S.000Z"
+}
+
+# Maximum bytes to keep for tool input/output payloads before truncating.
+# Braintrust has per-event size limits; large Read/Bash outputs can bloat traces quickly.
+export BRAINTRUST_CC_MAX_PAYLOAD_BYTES="${BRAINTRUST_CC_MAX_PAYLOAD_BYTES:-16384}"
+
+# Truncate a JSON payload if its serialized length exceeds the configured budget.
+# Inputs/outputs are replaced with {_truncated:true, original_bytes:N, preview:"..."}.
+# Always returns valid compact JSON on stdout.
+truncate_json_payload() {
+    local json="$1"
+    [ -z "$json" ] && { echo "{}"; return; }
+    local len="${#json}"
+    if [ "$len" -le "$BRAINTRUST_CC_MAX_PAYLOAD_BYTES" ]; then
+        printf '%s' "$json"
+        return
+    fi
+    local preview_len=$((BRAINTRUST_CC_MAX_PAYLOAD_BYTES / 4))
+    [ "$preview_len" -gt 2048 ] && preview_len=2048
+    local preview="${json:0:$preview_len}"
+    jq -cn --arg preview "$preview" --argjson bytes "$len" \
+        '{_truncated:true, original_bytes:$bytes, preview:$preview}' 2>/dev/null \
+        || echo '{"_truncated":true}'
+}
+
+# Get epoch seconds with sub-second precision (float). Falls back to integer seconds.
+get_epoch() {
+    python3 -c 'import time;print(f"{time.time():.3f}")' 2>/dev/null \
+        || gdate +%s.%3N 2>/dev/null \
+        || date +%s
+}
+
+# Convert ISO timestamp (UTC with Z suffix) to Unix epoch seconds (float with ms precision).
+# Preserving sub-second precision matters: without it, LLM spans derived from transcript
+# timestamps (int sec) get ordered before tool spans recorded via get_epoch (float sec),
+# even when the tool actually executed between two LLM calls.
+iso_to_epoch() {
+    local ts="$1"
+    [ -z "$ts" ] && { get_epoch; return; }
+    local ms="000"
+    if [[ "$ts" =~ \.([0-9]+)Z?$ ]]; then
+        ms="${BASH_REMATCH[1]}000"
+        ms="${ms:0:3}"
+    fi
+    # Strip trailing Z and optional .xxx, then append UTC offset
+    local clean_ts="${ts%Z}"
+    clean_ts="${clean_ts%.*}"
+    clean_ts="${clean_ts}+0000"
+    local sec
+    sec=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$clean_ts" "+%s" 2>/dev/null \
+          || date -d "$ts" "+%s" 2>/dev/null \
+          || date +%s)
+    echo "${sec}.${ms}"
+}
+
+###
+# Parse a Claude Code transcript jsonl and emit one Braintrust LLM span per LLM call,
+# attached to $parent_span_id. Tracks progress via session state key $last_line_key so
+# repeat invocations (stop hooks across turns) don't re-emit the same calls.
+#
+# Used by both stop_hook.sh (main transcript, parent=Turn span) and subagent_stop.sh
+# (sub-agent transcript, parent=Agent span).
+###
+emit_llm_spans_for_transcript() {
+    local conv_file="$1"
+    local parent_span_id="$2"
+    local last_line_key="$3"
+    local session_id="$4"
+    local project_id="$5"
+    local root_span_id="$6"
+
+    [ -z "$conv_file" ] || [ ! -f "$conv_file" ] && return 0
+    [ -z "$parent_span_id" ] || [ -z "$project_id" ] && return 0
+
+    local last_line
+    last_line=$(get_session_state "$session_id" "$last_line_key")
+    last_line=${last_line:-0}
+
+    local total_lines
+    total_lines=$(wc -l < "$conv_file" | tr -d ' ')
+
+    local llm_calls_created=0
+    local current_output="" current_tool_calls="[]" current_model=""
+    local current_prompt_tokens=0 current_completion_tokens=0
+    local current_cached=0 current_cache_create=0
+    local current_start="" current_end=""
+    local line_num=0
+    local history="[]"
+
+    _add_history() {
+        local role="$1" content="$2" tool_id="$3" tool_calls="$4"
+        if [ "$role" = "tool" ]; then
+            history=$(echo "$history" | jq --arg r "$role" --arg c "$content" --arg i "$tool_id" \
+                '. += [{role:$r, tool_call_id:$i, content:$c}]')
+        elif [ -n "$tool_calls" ] && [ "$tool_calls" != "[]" ]; then
+            history=$(echo "$history" | jq --arg r "$role" --arg c "$content" --argjson tc "$tool_calls" \
+                '. += [{role:$r, content:$c, tool_calls:$tc}]')
+        else
+            history=$(echo "$history" | jq --arg r "$role" --arg c "$content" \
+                '. += [{role:$r, content:$c}]')
+        fi
+    }
+
+    _emit_span() {
+        local text="$1" model="$2" prompt="$3" comp="$4" start_ts="$5" end_ts="$6" tc="$7" hist="$8" cached="$9" cache_create="${10}"
+        [ -z "$text" ] && [ "$tc" = "[]" ] && return 0
+
+        local span_id total_tokens start_time end_time output_json has_tc
+        span_id=$(generate_uuid)
+        total_tokens=$((prompt + comp))
+        start_time=$(iso_to_epoch "$start_ts")
+        end_time=$(iso_to_epoch "$end_ts")
+
+        has_tc=$(echo "$tc" | jq 'length > 0' 2>/dev/null)
+        if [ "$has_tc" = "true" ]; then
+            output_json=$(jq -n --arg c "${text:-}" --argjson tc "$tc" '{role:"assistant", content:$c, tool_calls:$tc}')
+        else
+            output_json=$(jq -n --arg c "$text" '{role:"assistant", content:$c}')
+        fi
+
+        local event
+        event=$(jq -n \
+            --arg id "$span_id" \
+            --arg root "$root_span_id" \
+            --arg parent "$parent_span_id" \
+            --arg created "${start_ts:-$(get_timestamp)}" \
+            --argjson input "$hist" \
+            --argjson output "$output_json" \
+            --arg model "${model:-claude}" \
+            --argjson prompt_tokens "$prompt" \
+            --argjson completion_tokens "$comp" \
+            --argjson cached_tokens "$cached" \
+            --argjson cache_creation_tokens "$cache_create" \
+            --argjson tokens "$total_tokens" \
+            --argjson start_time "$start_time" \
+            --argjson end_time "$end_time" \
+            '{
+                id:$id, span_id:$id, root_span_id:$root,
+                span_parents:[$parent], created:$created,
+                input:$input, output:$output,
+                metrics:{
+                    start:$start_time, end:$end_time,
+                    prompt_tokens:$prompt_tokens,
+                    completion_tokens:$completion_tokens,
+                    prompt_cached_tokens:$cached_tokens,
+                    prompt_cache_creation_tokens:$cache_creation_tokens,
+                    tokens:$tokens
+                },
+                metadata:{model:$model},
+                span_attributes:{name:$model, type:"llm"}
+            }')
+
+        insert_span "$project_id" "$event" >/dev/null && {
+            llm_calls_created=$((llm_calls_created + 1))
+            log "INFO" "LLM span: $model tokens=$total_tokens (parent=$parent_span_id)"
+        } || true
+    }
+
+    local line msg_type msg_ts content is_tool_result text tc has_tc model usage itok otok cr cc trc tuid
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+        [ "$line_num" -le "$last_line" ] && continue
+        [ -z "$line" ] && continue
+
+        msg_type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
+        msg_ts=$(echo "$line" | jq -r '.timestamp // empty' 2>/dev/null)
+
+        if [ "$msg_type" = "user" ]; then
+            content=$(echo "$line" | jq -r '.message.content // empty' 2>/dev/null)
+            is_tool_result=$(echo "$content" | jq -e '.[0].type == "tool_result"' >/dev/null 2>&1 && echo true || echo false)
+
+            if [ "$is_tool_result" = "true" ]; then
+                if [ -n "$current_output" ] || [ "$current_tool_calls" != "[]" ]; then
+                    _emit_span "$current_output" "$current_model" "$current_prompt_tokens" "$current_completion_tokens" "$current_start" "$current_end" "$current_tool_calls" "$history" "$current_cached" "$current_cache_create"
+                    _add_history "assistant" "$current_output" "" "$current_tool_calls"
+                fi
+                trc=$(echo "$content" | jq -r '.[0].content // "tool result"' 2>/dev/null)
+                tuid=$(echo "$content" | jq -r '.[0].tool_use_id // ""' 2>/dev/null)
+                _add_history "tool" "$trc" "$tuid" ""
+                current_output=""; current_tool_calls="[]"; current_model=""
+                current_prompt_tokens=0; current_completion_tokens=0
+                current_cached=0; current_cache_create=0
+                current_start="$msg_ts"; current_end=""
+            else
+                if [ -n "$current_output" ] || [ "$current_tool_calls" != "[]" ]; then
+                    _emit_span "$current_output" "$current_model" "$current_prompt_tokens" "$current_completion_tokens" "$current_start" "$current_end" "$current_tool_calls" "$history" "$current_cached" "$current_cache_create"
+                    _add_history "assistant" "$current_output" "" "$current_tool_calls"
+                fi
+                _add_history "user" "$content" "" ""
+                current_output=""; current_tool_calls="[]"; current_model=""
+                current_prompt_tokens=0; current_completion_tokens=0
+                current_cached=0; current_cache_create=0
+                current_start="$msg_ts"; current_end=""
+            fi
+
+        elif [ "$msg_type" = "assistant" ]; then
+            text=$(echo "$line" | jq -r '.message.content | if type=="array" then [.[]|select(.type=="text")|.text]|join("\n") elif type=="string" then . else empty end' 2>/dev/null)
+            tc=$(echo "$line" | jq -c '.message.content | if type=="array" then [.[]|select(.type=="tool_use")|{id:.id, type:"function", function:{name:.name, arguments:(.input|tojson)}}] else [] end' 2>/dev/null)
+            has_tc=$(echo "$tc" | jq 'length > 0' 2>/dev/null)
+
+            [ -z "$current_start" ] && current_start="$msg_ts"
+
+            if [ -n "$text" ]; then
+                if [ -n "$current_output" ]; then
+                    current_output="$current_output"$'\n'"$text"
+                else
+                    current_output="$text"
+                fi
+                current_end="$msg_ts"
+            fi
+            if [ "$has_tc" = "true" ]; then
+                current_tool_calls="$tc"
+                current_end="$msg_ts"
+            fi
+
+            model=$(echo "$line" | jq -r '.message.model // empty' 2>/dev/null)
+            [ -n "$model" ] && current_model="$model"
+
+            usage=$(echo "$line" | jq -c '.message.usage // {}' 2>/dev/null)
+            if [ "$usage" != "{}" ] && [ -n "$usage" ]; then
+                itok=$(echo "$usage" | jq -r '.input_tokens // 0' 2>/dev/null)
+                otok=$(echo "$usage" | jq -r '.output_tokens // 0' 2>/dev/null)
+                cr=$(echo "$usage" | jq -r '.cache_read_input_tokens // 0' 2>/dev/null)
+                cc=$(echo "$usage" | jq -r '.cache_creation_input_tokens // 0' 2>/dev/null)
+                [ "$itok" != "null" ] && [ "$itok" -gt 0 ] 2>/dev/null && current_prompt_tokens=$((current_prompt_tokens + itok))
+                [ "$otok" != "null" ] && [ "$otok" -gt 0 ] 2>/dev/null && current_completion_tokens=$((current_completion_tokens + otok))
+                if [ "$cr" != "null" ] && [ "$cr" -gt 0 ] 2>/dev/null; then
+                    current_cached=$((current_cached + cr))
+                    current_prompt_tokens=$((current_prompt_tokens + cr))
+                fi
+                if [ "$cc" != "null" ] && [ "$cc" -gt 0 ] 2>/dev/null; then
+                    current_cache_create=$((current_cache_create + cc))
+                    current_prompt_tokens=$((current_prompt_tokens + cc))
+                fi
+            fi
+        fi
+    done < "$conv_file"
+
+    if [ -n "$current_output" ] || [ "$current_tool_calls" != "[]" ]; then
+        _emit_span "$current_output" "$current_model" "$current_prompt_tokens" "$current_completion_tokens" "$current_start" "$current_end" "$current_tool_calls" "$history" "$current_cached" "$current_cache_create"
+    fi
+
+    local final_line="${line_num:-0}"
+    [ "$final_line" -lt "$total_lines" ] 2>/dev/null && final_line="$total_lines"
+    set_session_state "$session_id" "$last_line_key" "$final_line"
+
+    [ "$llm_calls_created" -gt 0 ] && log "INFO" "Emitted $llm_calls_created LLM spans (parent=$parent_span_id)"
+    return 0
 }
 
 # Get system info for metadata
