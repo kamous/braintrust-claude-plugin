@@ -14,7 +14,7 @@ tracing_enabled || { debug "Tracing disabled"; exit 0; }
 check_requirements || exit 0
 
 # Read input from stdin
-INPUT=$(cat)
+INPUT=$(read_canonical_event "session_end")
 debug "SessionEnd input: $(echo "$INPUT" | jq -c '.' 2>/dev/null | head -c 500)"
 
 # Extract session ID

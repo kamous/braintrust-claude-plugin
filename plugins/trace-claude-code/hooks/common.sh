@@ -1,7 +1,11 @@
 #!/bin/bash
+#!/bin/bash
 ###
-# Common utilities for Braintrust Claude Code tracing hooks
+# Common utilities for Braintrust tracing hooks (Claude Code + Copilot CLI)
 ###
+
+# Directory of this file — used to locate runtime adapters
+_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Config
 export LOG_FILE="$HOME/.claude/state/braintrust_hook.log"
@@ -601,4 +605,112 @@ get_username() {
 
 get_os() {
     uname -s 2>/dev/null || echo "unknown"
+}
+
+###
+# Multi-runtime support: canonical event normalization
+#
+# Each hook script calls:
+#   INPUT=$(read_canonical_event "event_hint")
+#
+# The function reads stdin, detects the CLI runtime (Claude Code or Copilot CLI),
+# sources the matching adapter from adapters/, and outputs a canonical JSON envelope
+# whose field names always match the Claude Code conventions that the rest of the
+# scripts already use (tool_name, tool_input, tool_response, agent_id, etc.).
+#
+# event_hint is a lowercase string passed by the calling script so the Copilot
+# adapter can manage session-file lifecycle (create on "session_start", delete on
+# "session_end"). It is ignored by the Claude adapter.
+###
+
+# Detect which CLI runtime is delivering this hook payload.
+_detect_runtime() {
+    local raw="$1"
+    local runtime="${CC_RUNTIME:-}"
+    if [ -z "$runtime" ]; then
+        # Copilot payloads use camelCase field names; Claude uses snake_case.
+        if echo "$raw" | jq -e '.toolName' >/dev/null 2>&1; then
+            runtime="copilot"
+        else
+            runtime="claude"
+        fi
+    fi
+    echo "$runtime"
+}
+
+# Read stdin, normalize to canonical JSON, and print to stdout.
+# Optional positional arg: event_hint (session_start | user_prompt | pre_tool |
+#   post_tool | subagent_stop | agent_stop | session_end)
+read_canonical_event() {
+    local event_hint="${1:-}"
+    local raw
+    raw=$(cat)
+
+    local runtime
+    runtime=$(_detect_runtime "$raw")
+
+    case "$runtime" in
+        copilot)
+            # shellcheck source=adapters/copilot.sh
+            source "$_COMMON_DIR/adapters/copilot.sh"
+            _normalize_to_canonical "$raw" "$event_hint"
+            ;;
+        *)
+            # shellcheck source=adapters/claude.sh
+            source "$_COMMON_DIR/adapters/claude.sh"
+            _normalize_to_canonical "$raw" "$event_hint"
+            ;;
+    esac
+}
+
+###
+# Lazily create an Agent task span when no SubagentStart event was fired
+# (e.g. Copilot CLI, which only has subagentStop).
+# Idempotent: returns the existing span_id if already created for this agent_id.
+###
+lazy_create_agent_span() {
+    local session_id="$1"
+    local agent_id="$2"
+    local project_id="$3"
+    local root_span_id="$4"
+    local turn_span_id="$5"
+    local agent_type="${6:-Agent}"
+
+    local existing
+    existing=$(get_session_state "$session_id" "agent_span_${agent_id}")
+    [ -n "$existing" ] && { echo "$existing"; return 0; }
+
+    local agent_span_id start_time timestamp
+    agent_span_id=$(generate_uuid)
+    start_time=$(get_epoch)
+    timestamp=$(get_timestamp)
+
+    local event
+    event=$(jq -n \
+        --arg id          "$agent_span_id" \
+        --arg root        "$root_span_id" \
+        --arg parent      "$turn_span_id" \
+        --arg created     "$timestamp" \
+        --arg agent_id    "$agent_id" \
+        --arg agent_type  "$agent_type" \
+        --arg name        "$agent_type" \
+        --argjson start   "$start_time" \
+        '{
+            id: $id, span_id: $id,
+            root_span_id: $root,
+            span_parents: [$parent],
+            created: $created,
+            metrics: { start: $start },
+            metadata: { agent_id: $agent_id, agent_type: $agent_type },
+            span_attributes: { name: $name, type: "task" }
+        }')
+
+    insert_span "$project_id" "$event" >/dev/null \
+        || { log "WARN" "lazy_create_agent_span failed (agent_id=$agent_id)"; echo ""; return 1; }
+
+    set_session_state "$session_id" "agent_span_${agent_id}" "$agent_span_id"
+    set_session_state "$session_id" "agent_start_${agent_id}" "$start_time"
+
+    log "INFO" "Agent span lazily created: $agent_type (agent_id=$agent_id, span=$agent_span_id)"
+    echo "$agent_span_id"
 }

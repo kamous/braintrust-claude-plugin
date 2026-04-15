@@ -15,10 +15,9 @@ tracing_enabled || { debug "Tracing disabled"; exit 0; }
 check_requirements || exit 0
 
 # Read input from stdin
-INPUT=$(cat)
+INPUT=$(read_canonical_event "session_start")
 debug "SessionStart input: $INPUT"
 
-# Extract session ID from input
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 
 if [ -z "$SESSION_ID" ]; then
@@ -62,6 +61,7 @@ debug "Claimed session root span: $ROOT_SPAN_ID"
 
 # Extract workspace info if available
 WORKSPACE=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+RUNTIME=$(echo "$INPUT" | jq -r '.runtime // "claude"' 2>/dev/null)
 WORKSPACE_NAME=$(basename "$WORKSPACE" 2>/dev/null || echo "Claude Code")
 
 # Get system info
@@ -80,6 +80,7 @@ EVENT=$(jq -n \
     --arg hostname "$HOSTNAME" \
     --arg username "$USERNAME" \
     --arg os "$OS" \
+    --arg runtime "$RUNTIME" \
     '{
         id: $id,
         span_id: $span_id,
@@ -92,7 +93,7 @@ EVENT=$(jq -n \
             hostname: $hostname,
             username: $username,
             os: $os,
-            source: "claude-code"
+            runtime: $runtime
         },
         span_attributes: {
             name: ("Claude Code: " + $workspace),

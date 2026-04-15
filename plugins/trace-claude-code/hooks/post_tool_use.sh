@@ -19,7 +19,7 @@ debug "PostToolUse hook triggered"
 tracing_enabled || { debug "Tracing disabled"; exit 0; }
 check_requirements || exit 0
 
-INPUT=$(cat)
+INPUT=$(read_canonical_event "post_tool")
 debug "PostToolUse input: $(echo "$INPUT" | jq -c '.' 2>/dev/null | head -c 500)"
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
@@ -44,6 +44,13 @@ TOOL_OUTPUT=$(truncate_json_payload "$TOOL_OUTPUT_RAW")
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null)
 TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null)
+
+# Copilot CLI: pre_tool_use.sh stores a pending tool_use_id since Copilot
+# doesn't provide one natively. Read and clear it here.
+if [ -z "$TOOL_USE_ID" ] && [ -n "$SESSION_ID" ]; then
+    TOOL_USE_ID=$(get_session_state "$SESSION_ID" "copilot_pending_tool_id")
+    [ -n "$TOOL_USE_ID" ] && set_session_state "$SESSION_ID" "copilot_pending_tool_id" ""
+fi
 
 [ -z "$TOOL_NAME" ] && exit 0
 [ -z "$SESSION_ID" ] && exit 0

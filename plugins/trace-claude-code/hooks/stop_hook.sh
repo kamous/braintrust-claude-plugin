@@ -14,7 +14,7 @@ debug "Stop hook triggered"
 tracing_enabled || { debug "Tracing disabled"; exit 0; }
 check_requirements || exit 0
 
-INPUT=$(cat)
+INPUT=$(read_canonical_event "agent_stop")
 debug "Stop input: $(echo "$INPUT" | jq -c '.' 2>/dev/null | head -c 500)"
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
