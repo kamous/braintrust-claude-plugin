@@ -14,7 +14,7 @@ debug "SubagentStop hook triggered"
 tracing_enabled || exit 0
 check_requirements || exit 0
 
-INPUT=$(cat)
+INPUT=$(read_canonical_event "subagent_stop")
 debug "SubagentStop input: $(echo "$INPUT" | jq -c '.' 2>/dev/null | head -c 500)"
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
@@ -24,7 +24,19 @@ LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null)
 AGENT_TRANSCRIPT=$(echo "$INPUT" | jq -r '.agent_transcript_path // empty' 2>/dev/null)
 
 [ -z "$SESSION_ID" ] && exit 0
-[ -z "$AGENT_ID" ] && { debug "SubagentStop missing agent_id"; exit 0; }
+
+# Copilot CLI: subagentStop payload carries no correlating fields (no
+# agent_id / prompt / lastMessage). Agent lifecycle is driven instead by
+# the paired `task` + `read_agent` tool calls in post_tool_use.sh, so skip
+# here to avoid emitting empty ghost spans.
+if [ -z "$AGENT_ID" ]; then
+    if [ "${CC_RUNTIME:-claude}" = "copilot" ]; then
+        debug "SubagentStop (copilot): skipping — handled via task/read_agent"
+        exit 0
+    else
+        debug "SubagentStop missing agent_id"; exit 0
+    fi
+fi
 
 PROJECT_ID=$(get_session_state "$SESSION_ID" "project_id")
 AGENT_SPAN_ID=$(get_session_state "$SESSION_ID" "agent_span_${AGENT_ID}")
@@ -34,7 +46,16 @@ if [ -z "$CC_EXPERIMENT_ID" ]; then
     export CC_EXPERIMENT_ID
 fi
 
-[ -z "$AGENT_SPAN_ID" ] && { debug "No agent span for $AGENT_ID, SubagentStart may have been missed"; exit 0; }
+# Lazily create the Agent span when SubagentStart was not fired (e.g. Copilot CLI).
+if [ -z "$AGENT_SPAN_ID" ]; then
+    ROOT_SPAN_ID_L=$(get_session_state "$SESSION_ID" "root_span_id")
+    TURN_SPAN_ID_L=$(get_session_state "$SESSION_ID" "current_turn_span_id")
+    [ -z "$PROJECT_ID" ] && exit 0
+    AGENT_SPAN_ID=$(lazy_create_agent_span \
+        "$SESSION_ID" "$AGENT_ID" "$PROJECT_ID" \
+        "$ROOT_SPAN_ID_L" "$TURN_SPAN_ID_L" "${AGENT_TYPE:-Agent}")
+fi
+[ -z "$AGENT_SPAN_ID" ] && { debug "No agent span for $AGENT_ID, skipping"; exit 0; }
 [ -z "$PROJECT_ID" ] && exit 0
 
 END_TIME=$(get_epoch)

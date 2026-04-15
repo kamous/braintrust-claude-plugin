@@ -14,7 +14,7 @@ debug "Stop hook triggered"
 tracing_enabled || { debug "Tracing disabled"; exit 0; }
 check_requirements || exit 0
 
-INPUT=$(cat)
+INPUT=$(read_canonical_event "agent_stop")
 debug "Stop input: $(echo "$INPUT" | jq -c '.' 2>/dev/null | head -c 500)"
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
@@ -45,6 +45,14 @@ fi
 if [ -n "$CONV_FILE" ] && [ -f "$CONV_FILE" ]; then
     debug "Processing main transcript: $CONV_FILE"
     emit_llm_spans_for_transcript "$CONV_FILE" "$TURN_SPAN_ID" "turn_last_line" "$SESSION_ID" "$PROJECT_ID" "$ROOT_SPAN_ID"
+fi
+
+# Copilot CLI: incrementally backfill LLM/sub-agent spans from events.jsonl.
+# Done on every Stop (not just session_end) because Copilot does not always
+# emit sessionEnd, and we want spans to appear progressively.
+if [ "${CC_RUNTIME:-claude}" = "copilot" ]; then
+    source "$SCRIPT_DIR/copilot_events.sh"
+    emit_copilot_event_spans "$SESSION_ID" "$PROJECT_ID" "$ROOT_SPAN_ID" || true
 fi
 
 # Close the Turn span

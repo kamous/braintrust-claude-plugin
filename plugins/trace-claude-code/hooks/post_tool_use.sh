@@ -19,7 +19,7 @@ debug "PostToolUse hook triggered"
 tracing_enabled || { debug "Tracing disabled"; exit 0; }
 check_requirements || exit 0
 
-INPUT=$(cat)
+INPUT=$(read_canonical_event "post_tool")
 debug "PostToolUse input: $(echo "$INPUT" | jq -c '.' 2>/dev/null | head -c 500)"
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
@@ -45,6 +45,13 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null)
 TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null)
 
+# Copilot CLI: pre_tool_use.sh stores a pending tool_use_id since Copilot
+# doesn't provide one natively. Read and clear it here.
+if [ -z "$TOOL_USE_ID" ] && [ -n "$SESSION_ID" ]; then
+    TOOL_USE_ID=$(get_session_state "$SESSION_ID" "copilot_pending_tool_id")
+    [ -n "$TOOL_USE_ID" ] && set_session_state "$SESSION_ID" "copilot_pending_tool_id" ""
+fi
+
 [ -z "$TOOL_NAME" ] && exit 0
 [ -z "$SESSION_ID" ] && exit 0
 
@@ -60,6 +67,74 @@ fi
 [ -z "$TURN_SPAN_ID" ] || [ -z "$PROJECT_ID" ] && { debug "No current turn"; exit 0; }
 
 END_TIME=$(get_epoch)
+
+###
+# Copilot CLI: "task" launches a sub-agent; "read_agent" delivers its result.
+# Copilot's subagent_stop payload has no correlation fields, so we drive the
+# Agent span lifecycle from these two tool calls instead.
+###
+if [ "${CC_RUNTIME:-claude}" = "copilot" ] && { [ "$TOOL_NAME" = "task" ] || [ "$TOOL_NAME" = "read_agent" ]; }; then
+    COPILOT_AGENT_NAME=$(echo "$TOOL_INPUT" | jq -r '.name // .agent_id // empty' 2>/dev/null)
+
+    if [ "$TOOL_NAME" = "task" ] && [ -n "$COPILOT_AGENT_NAME" ]; then
+        AGENT_SPAN_ID=$(generate_uuid)
+        SUB_PROMPT=$(echo "$TOOL_INPUT" | jq -r '.prompt // empty' 2>/dev/null)
+        AGENT_TYPE=$(echo "$TOOL_INPUT" | jq -r '.agent_type // "Agent"' 2>/dev/null)
+        AGENT_DESC=$(echo "$TOOL_INPUT" | jq -r '.description // empty' 2>/dev/null)
+        TIMESTAMP=$(get_timestamp)
+
+        EVENT=$(jq -n \
+            --arg id "$AGENT_SPAN_ID" \
+            --arg root "$ROOT_SPAN_ID" \
+            --arg parent "$TURN_SPAN_ID" \
+            --arg created "$TIMESTAMP" \
+            --arg agent_name "$COPILOT_AGENT_NAME" \
+            --arg agent_type "$AGENT_TYPE" \
+            --arg desc "$AGENT_DESC" \
+            --arg input "$SUB_PROMPT" \
+            --argjson start "$END_TIME" \
+            '{
+                id: $id, span_id: $id,
+                root_span_id: $root,
+                span_parents: [$parent],
+                created: $created,
+                input: $input,
+                metrics: { start: $start },
+                metadata: {
+                    agent_id: $agent_name,
+                    agent_type: $agent_type,
+                    description: $desc
+                },
+                span_attributes: { name: ("Agent: " + $agent_name), type: "task" }
+            }')
+        insert_span "$PROJECT_ID" "$EVENT" >/dev/null \
+            && set_session_state "$SESSION_ID" "copilot_agent_span_${COPILOT_AGENT_NAME}" "$AGENT_SPAN_ID" \
+            && log "INFO" "Copilot Agent launched: $COPILOT_AGENT_NAME (span=$AGENT_SPAN_ID)"
+        [ -n "$TOOL_USE_ID" ] && set_session_state "$SESSION_ID" "tool_start_${TOOL_USE_ID}" ""
+        exit 0
+    fi
+
+    if [ "$TOOL_NAME" = "read_agent" ] && [ -n "$COPILOT_AGENT_NAME" ]; then
+        STATUS=$(echo "$TOOL_OUTPUT_RAW" | jq -r '.textResultForLlm // empty' 2>/dev/null | grep -oE 'status: [a-z]+' | awk '{print $2}')
+        AGENT_SPAN_ID=$(get_session_state "$SESSION_ID" "copilot_agent_span_${COPILOT_AGENT_NAME}")
+        if [ -n "$AGENT_SPAN_ID" ] && [ "$STATUS" = "completed" ]; then
+            AGENT_OUTPUT=$(echo "$TOOL_OUTPUT_RAW" | jq -r '.textResultForLlm // empty' 2>/dev/null)
+            UPDATE=$(jq -n \
+                --arg id "$AGENT_SPAN_ID" \
+                --arg output "$AGENT_OUTPUT" \
+                --argjson end "$END_TIME" \
+                '{id:$id, _is_merge:true, output:$output, metrics:{end:$end}}')
+            # Keep copilot_agent_span_<name> in state: session_end.sh's
+            # events.jsonl parser still needs it to backfill sub-agent LLM
+            # and internal tool spans under the correct Agent span.
+            insert_span "$PROJECT_ID" "$UPDATE" >/dev/null \
+                && log "INFO" "Copilot Agent completed: $COPILOT_AGENT_NAME"
+            [ -n "$TOOL_USE_ID" ] && set_session_state "$SESSION_ID" "tool_start_${TOOL_USE_ID}" ""
+            exit 0
+        fi
+        # fall through and render read_agent as a regular tool if not completed or unknown agent
+    fi
+fi
 
 # Determine accurate start/end from the transcript by tool_use_id.
 # Hook dispatch is async and can lag several hundred ms; transcript message

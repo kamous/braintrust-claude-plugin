@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "CC_RUNTIME=copilot bash ${COPILOT_PLUGIN_ROOT}/hooks/session_start.sh",
+        "timeoutSec": 15
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "CC_RUNTIME=copilot bash ${COPILOT_PLUGIN_ROOT}/hooks/user_prompt_submit.sh",
+        "timeoutSec": 15
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "CC_RUNTIME=copilot bash ${COPILOT_PLUGIN_ROOT}/hooks/pre_tool_use.sh",
+        "timeoutSec": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "CC_RUNTIME=copilot bash ${COPILOT_PLUGIN_ROOT}/hooks/post_tool_use.sh",
+        "timeoutSec": 15
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "bash": "CC_RUNTIME=copilot bash ${COPILOT_PLUGIN_ROOT}/hooks/subagent_stop.sh",
+        "timeoutSec": 20
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "CC_RUNTIME=copilot bash ${COPILOT_PLUGIN_ROOT}/hooks/stop_hook.sh",
+        "timeoutSec": 20
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "CC_RUNTIME=copilot bash ${COPILOT_PLUGIN_ROOT}/hooks/session_end.sh",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

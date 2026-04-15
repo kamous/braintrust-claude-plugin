@@ -14,7 +14,7 @@ tracing_enabled || { debug "Tracing disabled"; exit 0; }
 check_requirements || exit 0
 
 # Read input from stdin
-INPUT=$(cat)
+INPUT=$(read_canonical_event "session_end")
 debug "SessionEnd input: $(echo "$INPUT" | jq -c '.' 2>/dev/null | head -c 500)"
 
 # Extract session ID
@@ -54,6 +54,13 @@ TURN_COUNT=${TURN_COUNT:-0}
 TOOL_COUNT=${TOOL_COUNT:-0}
 
 log "INFO" "Session ended: $SESSION_ID (turns=$TURN_COUNT, tools=$TOOL_COUNT)"
+
+# Copilot CLI: backfill LLM/sub-agent spans from ~/.copilot/session-state
+# events.jsonl, since hooks don't carry model/tokens or sub-agent internals.
+if [ "${CC_RUNTIME:-claude}" = "copilot" ]; then
+    source "$SCRIPT_DIR/copilot_events.sh"
+    emit_copilot_event_spans "$SESSION_ID" "$PROJECT_ID" "$ROOT_SPAN_ID" || true
+fi
 
 # Clean up session state (optional - keeps state file cleaner)
 # Uncomment to remove session from state after it ends:
